@@ -1,4 +1,4 @@
-const version = "0.3.1";
+const version = "0.4.0";
 
 addEventListener("fetch", (event) => {
   event.respondWith(handleRequest(event.request));
@@ -6,6 +6,7 @@ addEventListener("fetch", (event) => {
 
 const CLAUDE_API_KEY = "";
 const CLAUDE_BASE_URL = "https://api.anthropic.com";
+const MAX_TOKENS = 100000;
 
 const role_map = {
   system: "Human",
@@ -45,7 +46,7 @@ function claudeToChatGPTResponse(claudeResponse, stream = false) {
   const result = {
     id: `chatcmpl-${timestamp}`,
     created: timestamp,
-    model: "gpt-3.5-turbo-0301",
+    model: "gpt-3.5-turbo-0613",
     usage: {
       prompt_tokens: 0,
       completion_tokens: completionTokens,
@@ -82,38 +83,47 @@ async function streamJsonResponseBodies(response, writable) {
   const decoder = new TextDecoder();
 
   let buffer = "";
-  let prevCompletion = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
-      if (buffer) {
-        writer.write(encoder.encode(buffer));
-      }
+      writer.write(encoder.encode("data: [DONE]"));
       break;
     }
     const currentText = decoder.decode(value, { stream: true });
-    if (currentText.startsWith("data: ")) {
-      if (buffer) {
+    if (currentText.startsWith("event: ping")) {
+      continue;
+    }
+    const sanitizedText = currentText.replace("event: completion", "").trim();
+    if (buffer.startsWith("data: ") && buffer.endsWith("}")) {
+      try {
         const decodedLine = JSON.parse(buffer.slice(5));
-        const newCompletion = decodedLine["completion"].replace(
-          prevCompletion,
-          ""
-        );
-        const transformedLine = claudeToChatGPTResponse(
-          {
-            ...decodedLine,
-            completion: newCompletion,
-          },
-          true
-        );
+        const completion = decodedLine["completion"];
+        const stop_reason = decodedLine["stop_reason"];
+        let transformedLine = {};
+        if (stop_reason) {
+          transformedLine = claudeToChatGPTResponse(
+            {
+              completion: "",
+              stop_reason: stop_reason,
+            },
+            true
+          );
+        } else {
+          transformedLine = claudeToChatGPTResponse(
+            {
+              ...decodedLine,
+              completion: completion,
+            },
+            true
+          );
+        }
         writer.write(
           encoder.encode(`data: ${JSON.stringify(transformedLine)}\n\n`)
         );
-        prevCompletion = decodedLine["completion"];
         buffer = "";
-      }
+      } catch (e) {}
     }
-    buffer += currentText;
+    buffer += sanitizedText;
   }
 
   await writer.close();
@@ -148,18 +158,14 @@ async function handleRequest(request) {
 
     const requestBody = await request.json();
     const { model, messages, temperature, stop, stream } = requestBody;
-    const claudeModel = model_map[model] || "claude-v1.3-100k";
+    const claudeModel = model_map[model] || "claude-2";
 
     const prompt = convertMessagesToPrompt(messages);
-    let maxTokensToSample = 100000;
-    if (model !== "claude-v1.3-100k") {
-      maxTokensToSample = 9016;
-    }
     const claudeRequestBody = {
       prompt,
       model: claudeModel,
       temperature,
-      max_tokens_to_sample: maxTokensToSample,
+      max_tokens_to_sample: MAX_TOKENS,
       stop_sequences: stop,
       stream,
     };
@@ -167,8 +173,10 @@ async function handleRequest(request) {
     const claudeResponse = await fetch(`${CLAUDE_BASE_URL}/v1/complete`, {
       method: "POST",
       headers: {
+        accept: "application/json",
         "Content-Type": "application/json",
         "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(claudeRequestBody),
     });
@@ -235,7 +243,7 @@ const models_list = [
     parent: null,
   },
   {
-    id: "gpt-3.5-turbo-0301",
+    id: "gpt-3.5-turbo-0613",
     object: "model",
     created: 1677649963,
     owned_by: "openai",
@@ -255,7 +263,7 @@ const models_list = [
         is_blocking: false,
       },
     ],
-    root: "gpt-3.5-turbo-0301",
+    root: "gpt-3.5-turbo-0613",
     parent: null,
   },
   {
@@ -283,7 +291,7 @@ const models_list = [
     parent: null,
   },
   {
-    id: "gpt-4-0314",
+    id: "gpt-4-0613",
     object: "model",
     created: 1678604601,
     owned_by: "openai",
@@ -303,14 +311,14 @@ const models_list = [
         is_blocking: false,
       },
     ],
-    root: "gpt-4-0314",
+    root: "gpt-4-0613",
     parent: null,
   },
 ];
 
 const model_map = {
-  "gpt-3.5-turbo": "claude-v1.3",
-  "gpt-3.5-turbo-0301": "claude-v1.3",
-  "gpt-4": "claude-v1.3-100k",
-  "gpt-4-0314": "claude-v1.3-100k",
+  "gpt-3.5-turbo": "claude-instant-1",
+  "gpt-3.5-turbo-0613": "claude-instant-1",
+  "gpt-4": "claude-2",
+  "gpt-4-0613": "claude-2",
 };
